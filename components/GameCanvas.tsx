@@ -172,12 +172,10 @@ const GameCanvas: React.FC<GameCanvasProps> = ({
             if (Math.abs(p.vx) < 0.1) {
               p.stopped = true;
               
-              if (gameState !== GameState.LEVEL_CLEARED) {
-                  setGameState(GameState.LANDED);
-                  const distance = Math.floor(p.x - CONSTANTS.CANNON_X);
-                  const moneyEarned = Math.floor(distance / 5); 
-                  onFinishRound(moneyEarned, distance, 0, false);
-              }
+              setGameState(GameState.LANDED);
+              const distance = Math.floor(p.x - CONSTANTS.CANNON_X);
+              const moneyEarned = Math.floor(distance / 5); 
+              onFinishRound(moneyEarned, distance, 0, false);
             }
           }
         }
