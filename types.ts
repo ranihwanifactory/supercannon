@@ -6,6 +6,7 @@ export enum GameState {
   SHOP = 'SHOP',
   LOGIN = 'LOGIN',
   LEADERBOARD = 'LEADERBOARD',
+  LEVEL_CLEARED = 'LEVEL_CLEARED', // New state
 }
 
 export interface Vector2D {
@@ -23,6 +24,16 @@ export interface Particle {
   size: number;
 }
 
+export interface Castle {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  maxHealth: number;
+  currentHealth: number;
+  level: number;
+}
+
 export interface UpgradeStats {
   maxPower: number;
   aerodynamics: number;
@@ -33,6 +44,7 @@ export interface UpgradeStats {
 export interface GameStats {
   bestDistance: number;
   currentDistance: number;
+  maxLevel: number; // New stat
 }
 
 export interface LeaderboardEntry {
@@ -40,6 +52,7 @@ export interface LeaderboardEntry {
   displayName: string;
   photoURL?: string;
   score: number;
+  level: number; // Add level to leaderboard
   timestamp: number;
 }
 

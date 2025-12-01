@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
-import { GameState, UpgradeStats, Vector2D, Particle } from '../types';
+import { GameState, UpgradeStats, Vector2D, Particle, Castle } from '../types';
 import { CONSTANTS, COLORS } from '../constants';
 import { audioService } from '../services/audioService';
 
@@ -7,16 +7,20 @@ interface GameCanvasProps {
   gameState: GameState;
   setGameState: (state: GameState) => void;
   upgrades: UpgradeStats;
+  currentLevel: number;
   onDistanceUpdate: (dist: number) => void;
-  onFinishRound: (moneyEarned: number, distance: number) => void;
+  onFinishRound: (moneyEarned: number, distance: number, damageDealt: number, levelCleared: boolean) => void;
+  castleRef: React.MutableRefObject<Castle>;
 }
 
 const GameCanvas: React.FC<GameCanvasProps> = ({
   gameState,
   setGameState,
   upgrades,
+  currentLevel,
   onDistanceUpdate,
-  onFinishRound
+  onFinishRound,
+  castleRef
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   
@@ -38,6 +42,23 @@ const GameCanvas: React.FC<GameCanvasProps> = ({
       alpha: Math.random()
     }));
   }, []);
+
+  // Initialize Castle when level changes (handled by parent logic mostly, but we ensure ref is valid here)
+  useEffect(() => {
+    // If castle level doesn't match current level, reset it (safety check)
+    if (castleRef.current.level !== currentLevel) {
+       const dist = CONSTANTS.CASTLE_START_DIST + (currentLevel - 1) * CONSTANTS.CASTLE_DIST_INCREMENT;
+       castleRef.current = {
+         x: dist,
+         y: 0, // Calculated in render relative to ground
+         width: CONSTANTS.CASTLE_WIDTH,
+         height: CONSTANTS.CASTLE_HEIGHT,
+         maxHealth: CONSTANTS.CASTLE_BASE_HEALTH + (currentLevel - 1) * CONSTANTS.CASTLE_HEALTH_INCREMENT,
+         currentHealth: CONSTANTS.CASTLE_BASE_HEALTH + (currentLevel - 1) * CONSTANTS.CASTLE_HEALTH_INCREMENT,
+         level: currentLevel
+       };
+    }
+  }, [currentLevel, castleRef]);
 
   const resetProjectile = useCallback(() => {
     projectile.current = {
@@ -64,7 +85,7 @@ const GameCanvas: React.FC<GameCanvasProps> = ({
         vy: Math.sin(angle) * speed,
         life: 1.0,
         color: color,
-        size: Math.random() * 3 + 1
+        size: Math.random() * 4 + 2
       });
     }
   };
@@ -86,6 +107,9 @@ const GameCanvas: React.FC<GameCanvasProps> = ({
       const width = canvas.width;
       const height = canvas.height;
       const groundY = height - CONSTANTS.GROUND_HEIGHT;
+      
+      // Update castle Y based on ground
+      castleRef.current.y = groundY - castleRef.current.height;
 
       // --- Physics ---
       if (gameState === GameState.FIRING) {
@@ -100,12 +124,46 @@ const GameCanvas: React.FC<GameCanvasProps> = ({
         p.y += p.vy;
         p.rotation += p.vx * 0.1;
 
-        if (p.y + 10 >= groundY) {
+        // Castle Collision Check (AABB vs Point/Circle approx)
+        const castle = castleRef.current;
+        if (castle.currentHealth > 0 &&
+            p.x + 10 > castle.x && 
+            p.x - 10 < castle.x + castle.width &&
+            p.y + 10 > castle.y && 
+            p.y - 10 < castle.y + castle.height) {
+            
+            // Hit!
+            const damage = Math.floor(Math.abs(p.vx * 10) + Math.abs(p.vy * 10)) + 10;
+            castle.currentHealth = Math.max(0, castle.currentHealth - damage);
+            
+            // Visual feedback
+            spawnExplosion(p.x, p.y, COLORS.CASTLE_BODY, 10);
+            spawnExplosion(p.x, p.y, '#ffffff', 5);
+            audioService.playBoom();
+
+            // Bounce back
+            p.vx = -p.vx * 0.5;
+            p.vy = -p.vy * 0.5;
+            p.x += p.vx * 2; // Separate
+
+            if (castle.currentHealth <= 0) {
+                // Destroyed!
+                spawnExplosion(castle.x + castle.width/2, castle.y + castle.height/2, COLORS.CASTLE_ACCENT, 50);
+                setGameState(GameState.LEVEL_CLEARED);
+                const distance = Math.floor(p.x - CONSTANTS.CANNON_X);
+                const money = damage * 2 + 500; // Bonus for clear
+                onFinishRound(money, distance, damage, true);
+                p.stopped = true;
+            }
+        }
+
+        // Ground Collision
+        if (!p.stopped && p.y + 10 >= groundY) {
           if (Math.abs(p.vy) > 1) {
             p.y = groundY - 10;
             p.vy = -p.vy * upgrades.bounciness;
             p.vx *= CONSTANTS.GROUND_FRICTION;
-            spawnExplosion(p.x, p.y, '#fbbf24', 5); // Golden sparks
+            spawnExplosion(p.x, p.y, '#fbbf24', 5); 
             audioService.playBoom();
           } else {
             p.y = groundY - 10;
@@ -113,14 +171,18 @@ const GameCanvas: React.FC<GameCanvasProps> = ({
             p.vx *= 0.95;
             if (Math.abs(p.vx) < 0.1) {
               p.stopped = true;
-              setGameState(GameState.LANDED);
-              const distance = Math.floor(p.x - CONSTANTS.CANNON_X);
-              const moneyEarned = Math.floor(distance / 5); // More generous money
-              onFinishRound(moneyEarned, distance);
+              
+              if (gameState !== GameState.LEVEL_CLEARED) {
+                  setGameState(GameState.LANDED);
+                  const distance = Math.floor(p.x - CONSTANTS.CANNON_X);
+                  const moneyEarned = Math.floor(distance / 5); 
+                  onFinishRound(moneyEarned, distance, 0, false);
+              }
             }
           }
         }
         
+        // Camera logic
         let targetCamX = p.x - width * 0.3; 
         if (targetCamX < 0) targetCamX = 0;
         camera.current.x += (targetCamX - camera.current.x) * 0.1;
@@ -133,21 +195,18 @@ const GameCanvas: React.FC<GameCanvasProps> = ({
 
       // --- Drawing ---
       
-      // 1. Sky Gradient
       const gradient = ctx.createLinearGradient(0, 0, 0, height);
       gradient.addColorStop(0, COLORS.SKY_START);
       gradient.addColorStop(1, COLORS.SKY_END);
       ctx.fillStyle = gradient;
       ctx.fillRect(0, 0, width, height);
 
-      // 2. Stars (Parallax 0.05)
+      // Stars
       ctx.save();
       ctx.translate(-camera.current.x * 0.05, 0);
       ctx.fillStyle = COLORS.STAR;
       stars.current.forEach(star => {
-        // Infinite scrolling stars logic
         const visibleX = (star.x + camera.current.x * 0.05) % 2000; 
-        // We just draw them repeatedly
         for(let j=0; j<3; j++) {
             ctx.globalAlpha = star.alpha;
             ctx.beginPath();
@@ -158,7 +217,7 @@ const GameCanvas: React.FC<GameCanvasProps> = ({
       ctx.globalAlpha = 1;
       ctx.restore();
 
-      // 3. Mountains Far (Parallax 0.2)
+      // Mountains
       ctx.save();
       ctx.translate(-camera.current.x * 0.2, 0);
       ctx.fillStyle = COLORS.MOUNTAIN_FAR;
@@ -173,7 +232,6 @@ const GameCanvas: React.FC<GameCanvasProps> = ({
       ctx.fill();
       ctx.restore();
 
-      // 4. Mountains Near (Parallax 0.5)
       ctx.save();
       ctx.translate(-camera.current.x * 0.5, 0);
       ctx.fillStyle = COLORS.MOUNTAIN_NEAR;
@@ -188,26 +246,24 @@ const GameCanvas: React.FC<GameCanvasProps> = ({
       ctx.fill();
       ctx.restore();
 
-      // --- World Space Objects ---
+      // World Space
       ctx.save();
       ctx.translate(-camera.current.x, 0);
 
-      // 5. Ground
-      // Top Glowing Edge
+      // Ground
       ctx.fillStyle = COLORS.GROUND_TOP;
-      ctx.fillRect(0, groundY, Math.max(width + camera.current.x * 1.5, projectile.current.x + 2000), 10);
-      // Body
+      const worldWidth = Math.max(width + camera.current.x * 1.5, Math.max(projectile.current.x, castleRef.current.x) + 2000);
+      ctx.fillRect(0, groundY, worldWidth, 10);
       ctx.fillStyle = COLORS.GROUND_BODY;
-      ctx.fillRect(0, groundY + 10, Math.max(width + camera.current.x * 1.5, projectile.current.x + 2000), CONSTANTS.GROUND_HEIGHT);
+      ctx.fillRect(0, groundY + 10, worldWidth, CONSTANTS.GROUND_HEIGHT);
       
-      // Distance Markers
+      // Markers
       ctx.fillStyle = 'rgba(255,255,255,0.3)';
       ctx.font = 'bold 16px sans-serif';
       ctx.textAlign = 'center';
       for (let i = 0; i < 500; i++) {
         const markerX = CONSTANTS.CANNON_X + (i * 500);
         if (markerX > camera.current.x - 100 && markerX < camera.current.x + width + 100) {
-           // Glowing marker
            ctx.shadowColor = '#fff';
            ctx.shadowBlur = 10;
            ctx.fillRect(markerX - 2, groundY, 4, 30);
@@ -216,7 +272,46 @@ const GameCanvas: React.FC<GameCanvasProps> = ({
         }
       }
 
-      // 6. Cannon
+      // Draw Castle
+      const castle = castleRef.current;
+      if (castle.currentHealth > 0 || gameState === GameState.LEVEL_CLEARED) {
+          // If level cleared, maybe draw broken castle? For now simple shake if hit.
+          ctx.fillStyle = COLORS.CASTLE_BODY;
+          
+          // Castle Base
+          ctx.fillRect(castle.x, castle.y, castle.width, castle.height);
+          
+          // Battlements
+          const battlementWidth = castle.width / 5;
+          for(let i=0; i<5; i++) {
+              if (i%2===0) ctx.fillRect(castle.x + i*battlementWidth, castle.y - 20, battlementWidth, 20);
+          }
+          
+          // Door
+          ctx.fillStyle = '#1e1b4b';
+          ctx.beginPath();
+          ctx.arc(castle.x + castle.width/2, castle.y + castle.height, 30, Math.PI, 0);
+          ctx.fill();
+          
+          // Windows
+          ctx.fillStyle = COLORS.CASTLE_WINDOW;
+          if (castle.currentHealth > 0) {
+            ctx.shadowColor = COLORS.CASTLE_WINDOW;
+            ctx.shadowBlur = 10;
+            ctx.fillRect(castle.x + 20, castle.y + 40, 20, 30);
+            ctx.fillRect(castle.x + castle.width - 40, castle.y + 40, 20, 30);
+            ctx.shadowBlur = 0;
+          }
+
+          // Health Bar above castle
+          const hpPct = Math.max(0, castle.currentHealth / castle.maxHealth);
+          ctx.fillStyle = '#000';
+          ctx.fillRect(castle.x, castle.y - 40, castle.width, 10);
+          ctx.fillStyle = hpPct > 0.5 ? '#22c55e' : '#ef4444';
+          ctx.fillRect(castle.x, castle.y - 40, castle.width * hpPct, 10);
+      }
+
+      // Cannon
       ctx.save();
       ctx.translate(CONSTANTS.CANNON_X, groundY - 20);
       
@@ -231,31 +326,26 @@ const GameCanvas: React.FC<GameCanvasProps> = ({
 
       ctx.rotate(-cannonAngle);
       ctx.fillStyle = COLORS.CANNON;
-      // Futuristic Cannon Shape
       ctx.beginPath();
       ctx.moveTo(0, -15);
       ctx.lineTo(70, -10);
       ctx.lineTo(70, 10);
       ctx.lineTo(0, 15);
       ctx.fill();
-      
-      // Neon Ring on Barrel
       ctx.fillStyle = '#60a5fa';
       ctx.fillRect(50, -12, 10, 24);
       ctx.restore();
 
-      // Cannon Base (Dome)
       ctx.fillStyle = '#1e293b';
       ctx.beginPath();
       ctx.arc(CONSTANTS.CANNON_X, groundY - 10, 25, 0, Math.PI * 2);
       ctx.fill();
-      // Glowing Core
       ctx.fillStyle = '#60a5fa';
       ctx.beginPath();
       ctx.arc(CONSTANTS.CANNON_X, groundY - 10, 10, 0, Math.PI * 2);
       ctx.fill();
 
-      // 7. Projectile (Glowing Orb)
+      // Projectile
       const p = projectile.current;
       ctx.save();
       ctx.translate(p.x, p.y);
@@ -269,7 +359,7 @@ const GameCanvas: React.FC<GameCanvasProps> = ({
       ctx.shadowBlur = 0;
       ctx.restore();
 
-      // 8. Particles
+      // Particles
       for (let i = particles.current.length - 1; i >= 0; i--) {
         const pt = particles.current[i];
         pt.x += pt.vx;
@@ -288,7 +378,7 @@ const GameCanvas: React.FC<GameCanvasProps> = ({
         ctx.globalAlpha = 1;
       }
 
-      // 9. Trajectory Line
+      // Trajectory
       if (gameState === GameState.AIMING && dragStart.current && dragCurrent.current) {
         const dx = dragStart.current.x - dragCurrent.current.x;
         const dy = dragStart.current.y - dragCurrent.current.y;
@@ -320,10 +410,8 @@ const GameCanvas: React.FC<GameCanvasProps> = ({
 
     render();
     return () => cancelAnimationFrame(animationFrameId);
-  }, [gameState, upgrades, onDistanceUpdate, onFinishRound, setGameState, resetProjectile]);
+  }, [gameState, upgrades, currentLevel, onDistanceUpdate, onFinishRound, setGameState, resetProjectile, castleRef]);
 
-
-  // Input Handlers
   const handleStart = (clientX: number, clientY: number) => {
     if (gameState !== GameState.MENU && gameState !== GameState.AIMING) return;
     setGameState(GameState.AIMING);
